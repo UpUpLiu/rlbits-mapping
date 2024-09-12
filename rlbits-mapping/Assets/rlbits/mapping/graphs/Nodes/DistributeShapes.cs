@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 using XNode;
 
@@ -9,28 +10,19 @@ namespace RLBits.Mapping.Graphs
     [NodeTint(0.35f, 0.05f, 0.6f)]
     public class DistributeShapes : PCGNode
     {
-        [Output] public List<GridShape> m_Shapes;
+        [Output] public GridMap map;
         [Output] public float[] m_result;
 
+        [Header("最大形状数量")]
         public int m_MaxShapeCount;
-        public GridShape.Shape m_Shape;
-        public PlacementMode m_PlacementMode;
-
-        public Vector2 m_ShapeSizeMin;
-        public Vector2 m_ShapeSizeMax;
-        public int Buffer;
-        public bool m_Gradation;
+        
+        [Header("最小相隔半径")]
+        public int m_minRadius;
 
         private int[,] m_Area;
 
         protected Vector2Int m_NoiseParentSize;
-        public enum PlacementMode
-        {
-            AlwaysPlace = 0,
-            DiscardFailedPlace = 1
-        }
-
-
+        
 
         // Return the correct value of an output port when requested
         public override object GetValue(NodePort port)
@@ -46,11 +38,11 @@ namespace RLBits.Mapping.Graphs
                     return m_result;
                 }
             }
-            else if (port.fieldName == "m_Shapes")
+            else if (port.fieldName == "map")
             {
-                if (m_Shapes != null)
+                if (map != null)
                 {
-                    return m_Shapes;
+                    return map;
                 }
             }
             return null;
@@ -77,19 +69,12 @@ namespace RLBits.Mapping.Graphs
 
             SetShapeData();
 
-            for (int i = 0; i < m_Shapes.Count; i++)
+            
+            foreach (var mapGridShape in map.gridShapes)
             {
-                List<Vector2Int> indices = new List<Vector2Int>();
-                m_Shapes[i].GetIndicesInShape(ref indices);
-                foreach (Vector2Int index in indices)
-                {
-                    m_result[GridToArray(index)] =
-                        m_Gradation ? (float)(i + 1) / (float)m_Shapes.Count : 1.0f;
-
-                }
+                m_result[GridToArray(mapGridShape.Value.position)] = 1.0f;
             }
-
-
+            
 
             base.UpdateData(withOutputs);
         }
@@ -99,53 +84,43 @@ namespace RLBits.Mapping.Graphs
             Random.InitState(noiseGraph.m_MasterNode.Seed);
             //may not need this
             m_Area = new int[m_NoiseParentSize.x, m_NoiseParentSize.y];
-            m_Shapes = new List<GridShape>();
-            for (int i = 0; i < m_MaxShapeCount; i++)
+            map = new GridMap();
+            int count = m_MaxShapeCount;
+            m_minRadius = Mathf.Max(1, m_minRadius);
+            int tryCount = 10000000;
+            while (count > 0)
             {
-                GridShape rd = new GridShape();
-                rd.shape = m_Shape;
-                rd.width = (int)Random.Range(m_ShapeSizeMin.x, m_ShapeSizeMax.x);
-                rd.height = (int)Random.Range(m_ShapeSizeMin.y, m_ShapeSizeMax.y);
-                rd.position.x = Mathf.FloorToInt(Mathf.Lerp((rd.width * 0.5f), m_Area.GetLength(0) - (rd.width * 0.5f) - 1, Random.Range(0.0f, 1.0f)));
-                rd.position.y = Mathf.FloorToInt(Mathf.Lerp((rd.height * 0.5f), m_Area.GetLength(1) - (rd.height * 0.5f) - 1, Random.Range(0.0f, 1.0f)));
-
-                bool m_shouldAdd = true;
-
-                switch (m_PlacementMode)
+                tryCount--;
+                if (tryCount <= 0)
                 {
-                    default:
-                    case PlacementMode.AlwaysPlace:
-                        break;
-                    case PlacementMode.DiscardFailedPlace:
-                        if (DoesShapeIntersectOthers(rd))
-                        {
-                            m_shouldAdd = false;
-                        }
-                        break;
+                    break;
                 }
-                if (m_shouldAdd)
-                {
-                    m_Shapes.Add(rd);
-                }
-            }
-        }
-        public bool DoesShapeIntersectOthers(GridShape rd)
-        {
-            List<Vector2Int> indices = new List<Vector2Int>();
-            rd.GetIndicesInShape(ref indices, Buffer);
 
-            foreach (Vector2Int vi in indices)
-            {
-                foreach (GridShape gs in m_Shapes)
+                var x = Mathf.FloorToInt(Mathf.Lerp(m_Area.GetLength(0)*0.125f, m_Area.GetLength(0) * 0.875f, Random.Range(0.0f, 1.0f)));
+                var y = Mathf.FloorToInt(Mathf.Lerp(m_Area.GetLength(1)*0.125f, m_Area.GetLength(1) * 0.875f, Random.Range(0.0f, 1.0f)));
+                GridShape rd = new(map.GetKey(x, y));
+                rd.position.x = x;
+                rd.position.y = y;
+                bool add = true;
+                if (map.gridShapes.ContainsKey(map.GetKey(rd.position)))
                 {
-                    if (gs.isPointInShape(vi))
+                    continue;
+                }
+                foreach (KeyValuePair<int,GridShape> mapGridShape in map.gridShapes)
+                {
+                    if(Vector2Int.Distance(mapGridShape.Value.position, rd.position) < m_minRadius)
                     {
-                        return true;
+                        count++;
+                        add = false;
+                        break;
                     }
                 }
+                if (add)
+                {
+                    map.AddShape(rd);
+                }
+                count--;
             }
-            return false;
-
         }
     }
 }

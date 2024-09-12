@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 using XNode;
 namespace RLBits.Mapping.Graphs
@@ -9,37 +10,27 @@ namespace RLBits.Mapping.Graphs
 
     public class ConnectShapes : PCGNode
     {
-        [Input] public List<GridShape> m_Input;
+        protected Vector2Int m_NoiseParentSize;
+
+        [Input] public GridMap m_Input;
 
         [Output] public List<GridShape> m_Shapes;
         [Output] public float[] m_result;
-
-        public int AdditionalConnectionsToMake;
-        public float MapValue;
-        public HallwayAttach RoomPositionSample;
-        public GridShape.Shape HallwayShape;
-        public int HallwayMinSize;
-        public int HallwayMaxSize;
-        public bool HallWayUniformSize;
-
-        protected Vector2Int m_NoiseParentSize;
-
-
-        public enum HallwayAttach
-        {
-            ShapePosition = 0,
-            RandomInside = 1,
-            AxisAligned = 2
-        }
-
+        
+        [Header("单个节点最大链接数量")]
+        public int maxConnections = 6;
+        
+        [Header("单个节点最小链接数量")]
+        public int minConnections = 2;
+        
+        [Header("连接半径")]
+        public int radius = 15;
+        
         public class EdgeData
         {
-            public int a;
-            public int b;
-            public float weight;
+            public GridShape a;
+            public GridShape b;
         }
-
-
 
         // Return the correct value of an output port when requested
         public override object GetValue(NodePort port)
@@ -68,7 +59,7 @@ namespace RLBits.Mapping.Graphs
         public override void UpdateData(bool withOutputs = true)
         {
             m_NoiseParentSize = noiseGraph.Size;
-            m_Input = GetPort("m_Input").GetInputValue<List<GridShape>>();
+            m_Input = GetPort("m_Input").GetInputValue<GridMap>();
 
             m_result = new float[m_NoiseParentSize.x * m_NoiseParentSize.y];
 
@@ -81,206 +72,113 @@ namespace RLBits.Mapping.Graphs
 
             //construct mst
             List<EdgeData> allEdges = new List<EdgeData>();
-            for (int starts = 0; starts < m_Input.Count; starts++)
+            var keys = m_Input.gridShapes.Keys.ToList();
+            
+            for (int starts = 0; starts < keys.Count; starts++)
             {
                 for (int ends = 0; ends < starts; ends++)
                 {
                     if (starts == ends)
                         continue;
-
-
-                    EdgeData ed = new EdgeData();
-                    ed.a = starts;
-                    ed.b = ends;
-                    ed.weight = Vector2Int.Distance(m_Input[starts].position, m_Input[ends].position);
-                    allEdges.Add(ed);
+                    var startNode = m_Input.gridShapes[keys[starts]];
+                    var endNode = m_Input.gridShapes[keys[ends]];
+                    if (Vector2Int.Distance(startNode.position, endNode.position) > radius)
+                    {
+                        continue;
+                    }
+                    startNode.neighbours.Add(endNode.index);
+                    endNode.neighbours.Add(startNode.index);
+                    allEdges.Add(new EdgeData()
+                    {
+                        a = startNode,
+                        b = endNode
+                    });
                 }
             }
-
-            List<int> processedIndices = new List<int>();
-            List<EdgeData> minimumEdges = new List<EdgeData>();
-
-            processedIndices.Add(Random.Range(0, m_Input.Count));
-
-            for (int i = 0; i < m_Input.Count - 1; i++)
+            
+            //处理孤岛, 小于minConnections的节点, 就找到最近的节点连接到满足minConnections
+            foreach (var p in m_Input.gridShapes)
             {
-                float lowDistance = Mathf.Infinity;
-                EdgeData target = null;
-                foreach (EdgeData ed in allEdges)
+                var shape = p.Value;
+                while (shape.neighbours.Count < minConnections)
                 {
-                    if (processedIndices.Contains(ed.a) ^ processedIndices.Contains(ed.b))
+                    GridShape closestShape = null;
+                    float closestDistance = float.MaxValue;
+            
+                    foreach (var other in m_Input.gridShapes)
                     {
-                        if (ed.weight <= lowDistance)
+                        if (other.Key == p.Key || shape.neighbours.Contains(other.Value.index))
+                            continue;
+            
+                        float distance = Vector2Int.Distance(shape.position, other.Value.position);
+                        if (distance < closestDistance)
                         {
-                            lowDistance = ed.weight;
-                            target = ed;
+                            closestDistance = distance;
+                            closestShape = other.Value;
                         }
                     }
-                }
-
-                minimumEdges.Add(target);
-                allEdges.Remove(target);
-                if (!processedIndices.Contains(target.a))
-                {
-                    processedIndices.Add(target.a);
-                }
-                if (!processedIndices.Contains(target.b))
-                {
-                    processedIndices.Add(target.b);
-                }
-            }
-
-
-            for (int i = 0; i < AdditionalConnectionsToMake; i++)
-            {
-                float lowDistance = Mathf.Infinity;
-                EdgeData target = null;
-                foreach (EdgeData ed in allEdges)
-                {
-                    if (ed.weight <= lowDistance)
+            
+                    if (closestShape != null)
                     {
-                        lowDistance = ed.weight;
-                        target = ed;
+                        shape.neighbours.Add(closestShape.index);
+                        closestShape.neighbours.Add(shape.index);
+                        allEdges.Add(new EdgeData()
+                        {
+                            a = shape,
+                            b = closestShape
+                        });
+                    }
+                    else
+                    {
+                        break;
                     }
                 }
-                if (target == null)
-                {
-                    break;
-                }
-                minimumEdges.Add(target);
-                allEdges.Remove(target);
-
             }
-            foreach (EdgeData ed in minimumEdges)
+
+            //处理多余的连接, 大于maxConnections的节点, 就找到最远的节点断开连接
+            foreach (var p in m_Input.gridShapes)
             {
-
-                GridShape a = m_Input[ed.a];
-                GridShape b = m_Input[ed.b];
-
-
-                Vector2Int startPos = a.position;
-                Vector2Int endPos = b.position;
-                bool axisAlignedPlaced = false;
-
-                switch (RoomPositionSample)
+                var shape = p.Value;
+                while (shape.neighbours.Count > maxConnections)
                 {
-                    case HallwayAttach.RandomInside:
-                        startPos = a.GetRandomIndexInShape();
-                        endPos = b.GetRandomIndexInShape();
-                        break;
-                    case HallwayAttach.AxisAligned:
-                        axisAlignedPlaced = ConnectGridsAxisAligned(a, b, ref startPos, ref endPos);
-                        break;
-                }
-                //will need to support multiple lines here for proper axis aligned.
-                if (axisAlignedPlaced)
-                    continue;
-                m_Shapes = GetLineBetweenPoints(startPos, endPos);
-                List<Vector2Int> m_targetPositions = new List<Vector2Int>();
+                    GridShape farthestShape = null;
+                    float farthestDistance = float.MinValue;
 
-                foreach (GridShape gs in m_Shapes)
-                {
-                    gs.GetIndicesInShape(ref m_targetPositions);
-                }
-                foreach (Vector2Int pos in m_targetPositions)
-                {
-                    if (GridToArray(pos) < m_result.Length && GridToArray(pos) >= 0)
+                    foreach (var neighbourIndex in shape.neighbours)
                     {
-                        m_result[GridToArray(pos)] = MapValue;
+                        var neighbour = m_Input.gridShapes.Values.First(s => s.index == neighbourIndex);
+                        float distance = Vector2Int.Distance(shape.position, neighbour.position);
+                        if (distance > farthestDistance)
+                        {
+                            farthestDistance = distance;
+                            farthestShape = neighbour;
+                        }
+                    }
+
+                    if (farthestShape != null)
+                    {
+                        shape.neighbours.Remove(farthestShape.index);
+                        farthestShape.neighbours.Remove(shape.index);
+                        allEdges.RemoveAll(e => (e.a == shape && e.b == farthestShape) || (e.b == shape && e.a == farthestShape));
+                    }
+                    else
+                    {
+                        break;
                     }
                 }
-
             }
+
+            foreach (EdgeData edgeData in allEdges)
+            {
+                var ps = GetPointsOnLine(edgeData.a.position, edgeData.b.position);
+                foreach (Vector2Int vector2Int in ps)
+                {
+                    m_result[vector2Int.x + vector2Int.y * m_NoiseParentSize.x] = 1;
+                }
+            }
+            
             base.UpdateData(withOutputs);
-        }
-
-        private bool ConnectGridsAxisAligned(GridShape startShape, GridShape endShape, ref Vector2Int startPos, ref Vector2Int endPos)
-        {
-            //we pad with min hallway size to cover our bases - not always going to work out
-            //KPD TODO revisit padding here.
-            Vector2Int minA = new Vector2Int(startShape.MinX() + HallwayMinSize, startShape.MinY() + HallwayMinSize);
-            Vector2Int maxA = new Vector2Int(startShape.MaxX() - HallwayMinSize, startShape.MaxY() - HallwayMinSize);
-
-            Vector2Int minB = new Vector2Int(endShape.MinX() + HallwayMinSize, endShape.MinY() + HallwayMinSize);
-            Vector2Int maxB = new Vector2Int(endShape.MaxX() - HallwayMinSize, endShape.MaxY() - HallwayMinSize);
-
-            startPos = new Vector2Int(Random.Range(minA.x, maxA.x), Random.Range(minA.y, maxA.y));
-            endPos = new Vector2Int(Random.Range(minB.x, maxB.x), Random.Range(minB.y, maxB.y));
-
-
-            bool overlapOnX = (minA.x <= maxB.x && maxA.x >= minB.x);
-            bool overlapOnY = (minA.y <= maxB.y && maxA.y >= minB.y);
-
-            if (overlapOnX && overlapOnY)
-                return false; //already overlapping on both axes.
-
-
-            if (overlapOnX)
-            {
-                startPos.x = Random.Range(Mathf.Max(minA.x, minB.x), Mathf.Min(maxA.x, maxB.x));
-                startPos.y = Random.Range(minA.y, maxA.y);
-                endPos.x = startPos.x;
-                endPos.y = Random.Range(minB.y, maxB.y);
-                return false;
-
-            }
-            else if (overlapOnY)
-            {
-                startPos.y = Random.Range(Mathf.Max(minA.y, minB.y), Mathf.Min(maxA.y, maxB.y));
-                startPos.x = Random.Range(minA.x, maxA.x);
-                endPos.y = startPos.y;
-                endPos.x = Random.Range(minB.x, maxB.x);
-                return false;
-            }
-
-
-            //at this point we need a bend, so we make the joint
-            int jointX = startPos.x;
-            int jointY = endPos.y;
-
-            //and then do all the work to get and set these 2 paths.
-            m_Shapes = GetLineBetweenPoints(startPos, new Vector2Int(jointX, jointY));
-            m_Shapes.AddRange(GetLineBetweenPoints(new Vector2Int(jointX, jointY), endPos));
-            List<Vector2Int> m_targetPositions = new List<Vector2Int>();
-
-            foreach (GridShape gs in m_Shapes)
-            {
-                gs.GetIndicesInShape(ref m_targetPositions);
-            }
-            foreach (Vector2Int pos in m_targetPositions)
-            {
-                if (GridToArray(pos) < m_result.Length && GridToArray(pos) >= 0)
-                {
-                    m_result[GridToArray(pos)] = MapValue;
-                }
-            }
-            //returning true tells the calling method that it doesn't need to generate it's path
-            //as we've done it above.
-            return true;
-        }
-
-
-        private List<GridShape> GetLineBetweenPoints(Vector2Int a, Vector2Int b)
-        {
-            List<GridShape> result = new List<GridShape>();
-            List<Vector2Int> allPoints = GetPointsOnLine(a, b);
-            foreach (Vector2Int vi in allPoints)
-            {
-                GridShape gs = new GridShape();
-                gs.shape = HallwayShape;
-                gs.position = vi;
-                int size = Random.Range(HallwayMinSize, HallwayMaxSize);
-                gs.width = size;
-                if (!HallWayUniformSize)
-                {
-                    size = Random.Range(HallwayMinSize, HallwayMaxSize);
-                }
-                gs.height = size;
-
-                result.Add(gs);
-            }
-
-            return result;
+            
         }
 
         public static List<Vector2Int> GetPointsOnLine(Vector2Int p1, Vector2Int p2)
